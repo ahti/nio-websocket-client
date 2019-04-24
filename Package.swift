@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "swift-nio-websocket-client",
+    name: "nio-websocket-client",
     products: [
         .library(name: "NIOWebSocketClient", targets: ["NIOWebSocketClient"]),
     ],
