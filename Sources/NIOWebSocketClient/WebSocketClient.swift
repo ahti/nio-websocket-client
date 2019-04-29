@@ -51,7 +51,10 @@ public final class WebSocketClient {
             .channelInitializer { channel in
                 let httpEncoder = HTTPRequestEncoder()
                 let httpDecoder = ByteToMessageHandler(HTTPResponseDecoder(leftOverBytesStrategy: .forwardBytes))
-                let webSocketUpgrader = WebSocketClientUpgradeHandler(maxFrameSize: self.configuration.maxFrameSize) { channel, response in
+                let webSocketUpgrader = WebSocketClientUpgradeHandler(
+                    configuration: self.configuration,
+                    host: host
+                ) { channel, response in
                     let webSocket = Socket(channel: channel)
                     return channel.pipeline.removeHandler(httpEncoder).flatMap {
                         return channel.pipeline.removeHandler(httpDecoder)
@@ -97,7 +100,8 @@ internal final class WebSocketClientUpgradeHandler: ChannelInboundHandler, Remov
     typealias InboundIn = HTTPClientResponsePart
     typealias OutboundOut = HTTPClientRequestPart
 
-    private let maxFrameSize: Int
+    private let configuration: WebSocketClient.Configuration
+    private let host: String
     private let upgradePipelineHandler: (Channel, HTTPResponseHead) -> EventLoopFuture<Void>
 
     private enum State {
@@ -108,10 +112,12 @@ internal final class WebSocketClientUpgradeHandler: ChannelInboundHandler, Remov
     private var state: State
 
     init(
-        maxFrameSize: Int,
+        configuration: WebSocketClient.Configuration,
+        host: String,
         upgradePipelineHandler: @escaping (Channel, HTTPResponseHead) -> EventLoopFuture<Void>
     ) {
-        self.maxFrameSize = maxFrameSize
+        self.configuration = configuration
+        self.host = host
         self.upgradePipelineHandler = upgradePipelineHandler
         self.state = .ready
     }
@@ -152,7 +158,7 @@ internal final class WebSocketClientUpgradeHandler: ChannelInboundHandler, Remov
         headers.add(name: "connection", value: "Upgrade")
         headers.add(name: "upgrade", value: "websocket")
         headers.add(name: "origin", value: "vapor/websocket")
-        headers.add(name: "host", value: "echo.websocket.org")
+        headers.add(name: "host", value: self.host)
         headers.add(name: "sec-websocket-version", value: "13")
         let bytes: [UInt8]  = [
             .random, .random, .random, .random,
@@ -167,7 +173,7 @@ internal final class WebSocketClientUpgradeHandler: ChannelInboundHandler, Remov
     func upgrade(context: ChannelHandlerContext, upgradeResponse: HTTPResponseHead) -> EventLoopFuture<Void> {
         return context.channel.pipeline.addHandlers([
             WebSocketFrameEncoder(),
-            ByteToMessageHandler(WebSocketFrameDecoder(maxFrameSize: self.maxFrameSize))
+            ByteToMessageHandler(WebSocketFrameDecoder(maxFrameSize: self.configuration.maxFrameSize))
         ], position: .first).flatMap {
             return context.pipeline.removeHandler(self)
         }.flatMap {
