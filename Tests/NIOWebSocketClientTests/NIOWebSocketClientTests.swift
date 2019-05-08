@@ -15,4 +15,27 @@ final class NIOWebSocketClientTests: XCTestCase {
             }
         }.wait()
     }
+    
+    public func testActivityExample() throws {
+        let configuration = WebSocketClient.Configuration(tlsConfiguration: .forClient())
+        let client = WebSocketClient(eventLoopGroupProvider: .createNew, configuration: configuration)
+        defer { try! client.syncShutdown() }
+        try client.connect(
+            host: "api-activity.v2.vapor.cloud",
+            port: 443,
+            uri: "echo-test"
+        ) { webSocket in
+            var count = 0
+            webSocket.send(text: "Hello")
+            webSocket.onText { webSocket, string in
+                count += 1
+                guard count > 5 else {
+                    sleep(2)
+                    webSocket.send(text: "ayo \(count)")
+                    return
+                }
+                webSocket.close(promise: nil)
+            }
+        }.wait()
+    }
 }

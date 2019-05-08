@@ -3,9 +3,17 @@ import NIO
 import NIOConcurrencyHelpers
 import NIOHTTP1
 import NIOWebSocket
+import NIOSSL
 
 public enum WebSocketClientError: Error {
+    case invalidResponseStatus(HTTPResponseHead)
     case alreadyShutdown
+}
+
+extension WebSocketClientError: LocalizedError {
+    public var errorDescription: String? {
+        return "\(self)"
+    }
 }
 
 public enum EventLoopGroupProvider {
@@ -17,8 +25,14 @@ extension HTTPRequestEncoder: RemovableChannelHandler { }
 
 public final class WebSocketClient {
     public struct Configuration {
+        public var tlsConfiguration: TLSConfiguration?
         public var maxFrameSize: Int
-        public init(maxFrameSize: Int = 1 << 14) {
+        
+        public init(
+            tlsConfiguration: TLSConfiguration? = nil,
+            maxFrameSize: Int = 1 << 14
+        ) {
+            self.tlsConfiguration = tlsConfiguration
             self.maxFrameSize = maxFrameSize
         }
     }
@@ -46,6 +60,7 @@ public final class WebSocketClient {
         headers: HTTPHeaders = [:],
         onUpgrade: @escaping (Socket) -> ()
     ) -> EventLoopFuture<Void> {
+        let upgradePromise = self.group.next().makePromise(of: Void.self)
         let bootstrap = ClientBootstrap(group: self.group)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_NODELAY), value: 1)
             .channelInitializer { channel in
@@ -53,7 +68,9 @@ public final class WebSocketClient {
                 let httpDecoder = ByteToMessageHandler(HTTPResponseDecoder(leftOverBytesStrategy: .forwardBytes))
                 let webSocketUpgrader = WebSocketClientUpgradeHandler(
                     configuration: self.configuration,
-                    host: host
+                    host: host,
+                    uri: uri,
+                    upgradePromise: upgradePromise
                 ) { channel, response in
                     let webSocket = Socket(channel: channel)
                     return channel.pipeline.removeHandler(httpEncoder).flatMap {
@@ -64,11 +81,21 @@ public final class WebSocketClient {
                         onUpgrade(webSocket)
                     }
                 }
-                return channel.pipeline.addHandlers([httpEncoder, httpDecoder, webSocketUpgrader])
+                var handlers: [ChannelHandler] = []
+                if let tlsConfiguration = self.configuration.tlsConfiguration {
+                    let context = try! NIOSSLContext(configuration: tlsConfiguration)
+                    let tlsHandler = try! NIOSSLClientHandler(context: context, serverHostname: host)
+                    handlers.append(tlsHandler)
+                }
+                handlers += [httpEncoder, httpDecoder, webSocketUpgrader]
+                return channel.pipeline.addHandlers(handlers)
             }
 
-        return bootstrap.connect(host: host, port: port)
-            .flatMap { $0.closeFuture }
+        return bootstrap.connect(host: host, port: port).flatMap { channel in
+            return upgradePromise.futureResult.flatMap {
+                return channel.closeFuture
+            }
+        }
     }
 
 
@@ -102,6 +129,8 @@ internal final class WebSocketClientUpgradeHandler: ChannelInboundHandler, Remov
 
     private let configuration: WebSocketClient.Configuration
     private let host: String
+    private let uri: String
+    private let upgradePromise: EventLoopPromise<Void>
     private let upgradePipelineHandler: (Channel, HTTPResponseHead) -> EventLoopFuture<Void>
 
     private enum State {
@@ -114,10 +143,14 @@ internal final class WebSocketClientUpgradeHandler: ChannelInboundHandler, Remov
     init(
         configuration: WebSocketClient.Configuration,
         host: String,
+        uri: String,
+        upgradePromise: EventLoopPromise<Void>,
         upgradePipelineHandler: @escaping (Channel, HTTPResponseHead) -> EventLoopFuture<Void>
     ) {
         self.configuration = configuration
         self.host = host
+        self.uri = uri
+        self.upgradePromise = upgradePromise
         self.upgradePipelineHandler = upgradePipelineHandler
         self.state = .ready
     }
@@ -127,14 +160,13 @@ internal final class WebSocketClientUpgradeHandler: ChannelInboundHandler, Remov
         switch response {
         case .head(let head):
             self.state = .awaitingResponseEnd(head)
-        case .body:
+        case .body(var buffer):
             // ignore bodies
             break
         case .end:
             switch self.state {
             case .awaitingResponseEnd(let head):
-                #warning("TODO: don't ignore future result")
-                _ = self.upgrade(context: context, upgradeResponse: head)
+                self.upgrade(context: context, upgradeResponse: head).cascade(to: self.upgradePromise)
             case .ready:
                 fatalError("Invalid response state")
             }
@@ -145,7 +177,8 @@ internal final class WebSocketClientUpgradeHandler: ChannelInboundHandler, Remov
         context.fireChannelActive()
         let request = HTTPRequestHead(
             version: .init(major: 1, minor: 1),
-            method: .GET, uri: "/",
+            method: .GET,
+            uri: self.uri.hasPrefix("/") ? self.uri : "/" + self.uri,
             headers: self.buildUpgradeRequest()
         )
         context.write(self.wrapOutboundOut(.head(request)), promise: nil)
@@ -171,13 +204,20 @@ internal final class WebSocketClientUpgradeHandler: ChannelInboundHandler, Remov
     }
 
     func upgrade(context: ChannelHandlerContext, upgradeResponse: HTTPResponseHead) -> EventLoopFuture<Void> {
+        guard upgradeResponse.status == .switchingProtocols else {
+            return context.eventLoop.makeFailedFuture(
+                WebSocketClientError.invalidResponseStatus(upgradeResponse)
+            )
+        }
+        
         return context.channel.pipeline.addHandlers([
             WebSocketFrameEncoder(),
             ByteToMessageHandler(WebSocketFrameDecoder(maxFrameSize: self.configuration.maxFrameSize))
-        ], position: .first).flatMap {
+        ]).flatMap {
             return context.pipeline.removeHandler(self)
         }.flatMap {
             return self.upgradePipelineHandler(context.channel, upgradeResponse)
         }
     }
 }
+
