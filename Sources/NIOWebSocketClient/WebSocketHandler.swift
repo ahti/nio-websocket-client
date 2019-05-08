@@ -135,6 +135,5 @@ private final class WebSocketHandler: ChannelInboundHandler {
         _ = context.writeAndFlush(self.wrapOutboundOut(frame)).flatMap {
             context.close(mode: .output)
         }
-        self.webSocket.isClosed = true
     }
 }

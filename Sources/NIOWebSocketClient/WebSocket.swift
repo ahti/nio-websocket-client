@@ -33,7 +33,6 @@ extension WebSocketClient {
         /// Use `httpProtocolUpgrader(...)` to create a protocol upgrader that can create `WebSocket`s.
         init(channel: Channel) {
             self.channel = channel
-            self.isClosed = false
             self.onTextCallback = { _, _ in }
             self.onBinaryCallback = { _, _ in }
             self.onErrorCallback = { _, _ in }
@@ -143,14 +142,15 @@ extension WebSocketClient {
             buffer.writeBytes(data)
             self.send(buffer, opcode: opcode, fin: fin, promise: promise)
         }
-
-        // MARK: Close
+        
         /// `true` if the `WebSocket` has been closed.
-        public internal(set) var isClosed: Bool
+        public var isClosed: Bool {
+            return !self.channel.isActive
+        }
 
         /// A `Future` that will be completed when the `WebSocket` closes.
         public var onClose: EventLoopFuture<Void> {
-            return channel.closeFuture
+            return self.channel.closeFuture
         }
 
         public func close(code: WebSocketErrorCode? = nil) -> EventLoopFuture<Void> {
@@ -164,7 +164,6 @@ extension WebSocketClient {
                 promise?.succeed(())
                 return
             }
-            self.isClosed = true
             if let code = code {
                 self.sendClose(code: code)
             }
