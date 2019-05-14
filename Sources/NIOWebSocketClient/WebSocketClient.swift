@@ -91,7 +91,9 @@ public final class WebSocketClient {
                 return channel.pipeline.addHandlers(handlers)
             }
 
-        return bootstrap.connect(host: host, port: port).flatMap { channel in
+        let c = bootstrap.connect(host: host, port: port)
+        c.whenFailure(upgradePromise.fail)
+        return c.flatMap { channel in
             return upgradePromise.futureResult.flatMap {
                 return channel.closeFuture
             }
@@ -190,7 +192,7 @@ internal final class WebSocketClientUpgradeHandler: ChannelInboundHandler, Remov
         var headers = HTTPHeaders()
         headers.add(name: "connection", value: "Upgrade")
         headers.add(name: "upgrade", value: "websocket")
-        headers.add(name: "origin", value: "vapor/websocket")
+//        headers.add(name: "origin", value: "vapor/websocket")
         headers.add(name: "host", value: self.host)
         headers.add(name: "sec-websocket-version", value: "13")
         let bytes: [UInt8]  = [
